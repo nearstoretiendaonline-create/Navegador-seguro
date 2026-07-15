@@ -1,202 +1,45 @@
-import os
-from kivy.utils import platform
-from kivy.clock import Clock
-from kivy.uix.widget import Widget
-from kivy.lang import Builder
-from kivymd.app import MDApp
+name: Android Build Robot
 
-# ==============================================================================
-# 🤖 COMPORTAMIENTO NATIVO PARA ANDROID (Pyjnius Wrapper)
-# ==============================================================================
-if platform == 'android':
-    from jnius import autoclass
-    from android.runnable import run_on_ui_thread
+on:
+  push:
+    branches: [ main, master ]  # El robot se activa al hacer push a estas ramas
+  workflow_dispatch:            # Te permite activar el robot manualmente desde la web de GitHub
 
-    # Importamos las clases nativas de Android necesarias
-    Activity = autoclass('org.kivy.android.PythonActivity').mActivity
-    WebView = autoclass('android.webkit.WebView')
-    WebViewClient = autoclass('android.webkit.WebViewClient')
-    LayoutParams = autoclass('android.view.ViewGroup$LayoutParams')
-    LinearLayout = autoclass('android.widget.LinearLayout')
-else:
-    # Definición nula para evitar crashes de importación en desarrollo (Desktop)
-    def run_on_ui_thread(func):
-        return func
+jobs:
+  compile:
+    runs-on: ubuntu-22.04
 
-# ==============================================================================
-# 🎨 INTERFAZ GRÁFICA (Declaración KV)
-# ==============================================================================
-KV = '''
-MDBoxLayout:
-    orientation: 'vertical'
-    md_bg_color: 0.1, 0.1, 0.12, 1
+    steps:
+    - name: 1. Descargar Código del Repositorio
+      uses: actions/checkout@v4
 
-    # 1. Barra de Navegación Superior
-    MDBoxLayout:
-        size_hint_y: None
-        height: "56dp"
-        padding: "8dp"
-        spacing: "8dp"
-        md_bg_color: 0.15, 0.15, 0.18, 1
+    - name: 2. Configurar Entorno Java (Requerido para Android SDK)
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '17'
 
-        MDIconButton:
-            icon: "arrow-left"
-            theme_text_color: "Custom"
-            text_color: 1, 1, 1, 1
-            on_release: app.go_back()
+    - name: 3. Instalar Dependencias del Sistema Linux
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y git zip unzip python3-pip autoconf libtool pkg-config \
+          zlib1g-dev libncurses5-dev libncursesw5-dev libtinfo5 cmake libffi-dev libssl-dev
 
-        MDIconButton:
-            icon: "arrow-right"
-            theme_text_color: "Custom"
-            text_color: 1, 1, 1, 1
-            on_release: app.go_forward()
+    - name: 4. Instalar Buildozer y Cython
+      run: |
+        pip3 install --user --upgrade "buildozer>=1.5.0" "cython<3.0.0"
+        # Añade las herramientas locales al PATH del sistema para poder invocar 'buildozer'
+        echo "$HOME/.local/bin" >> $GITHUB_PATH
 
-        MDIconButton:
-            icon: "refresh"
-            theme_text_color: "Custom"
-            text_color: 1, 1, 1, 1
-            on_release: app.reload_page()
+    - name: 5. Ejecutar Compilación con Buildozer
+      run: |
+        # 'yes' responde afirmativamente a todas las licencias del SDK de Android automáticamente
+        yes | buildozer -v android debug
 
-        MDTextField:
-            id: url_input
-            text: "https://www.google.com"
-            mode: "round"
-            size_hint_y: None
-            height: "40dp"
-            font_size: "14sp"
-            active_line: False
-            multiline: False
-            on_text_validate: app.load_url(self.text)
-
-        MDIconButton:
-            icon: "magnify"
-            theme_text_color: "Custom"
-            text_color: 1, 0.75, 0, 1  # Accent Amarillo/Dorado
-            on_release: app.load_url(url_input.text)
-
-    # 2. Contenedor del Navegador
-    # Actúa como placeholder en Desktop y como ancla de coordenadas en Android
-    MDBoxLayout:
-        id: webview_container
-        md_bg_color: 0.2, 0.2, 0.22, 1
+    - name: 6. Guardar y Extraer el APK Resultante
+      uses: actions/upload-artifact@v4
+      with:
+        name: Mi-Navegador-App
+        path: bin/*.apk
+        retention-days: 7  # El APK estará disponible para descarga durante una semana
         
-        MDLabel:
-            id: desktop_placeholder
-            text: "Modo de desarrollo activo.\\nEl WebView nativo se iniciará en Android."
-            halign: "center"
-            theme_text_color: "Secondary"
-'''
-
-class BrowserApp(MDApp):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.webview = None
-
-    def build(self):
-        self.theme_cls.theme_style = "Dark"
-        self.theme_cls.primary_palette = "Amber"
-        return Builder.load_string(KV)
-
-    def on_start(self):
-        # Programar la inicialización del WebView una vez que la UI esté dibujada
-        Clock.schedule_once(self.create_webview, 0.5)
-
-    @run_on_ui_thread
-    def create_webview(self, *args):
-        """Inicializa el componente WebView nativo de Android en el hilo de la UI."""
-        if platform != 'android':
-            return
-
-        # 1. Crear instancia del WebView de Android
-        self.webview = WebView(Activity)
-        
-        # 2. Configurar el cliente web para que los enlaces se abran dentro de la App
-        # y no disparen un navegador externo (como Chrome de fábrica)
-        self.webview.setWebViewClient(WebViewClient())
-        
-        # 3. Habilitar Javascript (Esencial para la web moderna)
-        settings = self.webview.getSettings()
-        settings.setJavaScriptEnabled(True)
-        settings.setDomStorageEnabled(True) # Para sesiones y cookies de sitios modernos
-
-        # 4. Obtener las coordenadas físicas de nuestro contenedor en Kivy
-        container = self.root.ids.webview_container
-        
-        # Ocultar el Label de desarrollo
-        self.root.ids.desktop_placeholder.text = ""
-
-        # 5. Agregar el WebView directamente a la vista activa de Android
-        layout = LinearLayout(Activity)
-        layout.addView(self.webview)
-        
-        # Añadir layout a la actividad principal
-        Activity.addContentView(layout, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
-        
-        # Ajustar los márgenes de la ventana nativa para que respete nuestra barra de búsqueda superior
-        # Nota: La conversión de coordenadas Kivy a Android nativo se hace calculando la altura de la barra.
-        Clock.schedule_once(self.update_webview_size, 0.1)
-        
-        # Cargar página de inicio por defecto
-        self.webview.loadUrl(self.root.ids.url_input.text)
-
-    def update_webview_size(self, *args):
-        """Ajusta la posición del WebView nativo para que coincida con el espacio libre."""
-        if platform == 'android' and self.webview:
-            # Calculamos la altura de la barra superior en pixeles para desplazar el WebView hacia abajo
-            barra_height = int(self.root.ids.url_input.parent.height)
-            
-            # Ajustamos los márgenes (Top margin = barra de búsqueda)
-            params = self.webview.getLayoutParams()
-            # Convertimos DPs de Kivy a pixeles para Android
-            density = Activity.getResources().getDisplayMetrics().density
-            params.topMargin = int(barra_height * density)
-            self.webview.setLayoutParams(params)
-
-    # ==============================================================================
-    # CONTROLES DE NAVEGACIÓN
-    # ==============================================================================
-    def load_url(self, url):
-        """Carga una nueva dirección en el navegador."""
-        if not url.startswith("http://") and not url.startswith("https://"):
-            url = "https://" + url
-            self.root.ids.url_input.text = url
-
-        if platform == 'android' and self.webview:
-            self._load_url_android(url)
-        else:
-            print(f"[Desktop Simulation] Navegando a: {url}")
-            self.root.ids.desktop_placeholder.text = f"Simulando carga de:\\n{url}"
-
-    @run_on_ui_thread
-    def _load_url_android(self, url):
-        self.webview.loadUrl(url)
-
-    def go_back(self):
-        if platform == 'android' and self.webview:
-            self._go_back_android()
-
-    @run_on_ui_thread
-    def _go_back_android(self):
-        if self.webview.canGoBack():
-            self.webview.goBack()
-
-    def go_forward(self):
-        if platform == 'android' and self.webview:
-            self._go_forward_android()
-
-    @run_on_ui_thread
-    def _go_forward_android(self):
-        if self.webview.canGoForward():
-            self.webview.goForward()
-
-    def reload_page(self):
-        if platform == 'android' and self.webview:
-            self._reload_android()
-
-    @run_on_ui_thread
-    def _reload_android(self):
-        self.webview.reload()
-
-if __name__ == '__main__':
-    BrowserApp().run()
-
